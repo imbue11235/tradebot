@@ -1,0 +1,27 @@
+[Unit]
+Description=Tradebot — News sentiment day trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ─── Edit these paths to match your setup ───────────────────────────────────
+WorkingDirectory=/home/YOUR_USER/tradebot
+ExecStart=/home/YOUR_USER/tradebot/venv/bin/python main.py
+
+# Restart automatically if it crashes (but not on clean exit)
+Restart=on-failure
+RestartSec=30
+
+# Output logs to journald (view with: journalctl -u tradebot -f)
+StandardOutput=journal
+StandardError=journal
+
+# Run as a non-root user for security
+User=YOUR_USER
+Group=YOUR_USER
+
+# Give it a clean environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

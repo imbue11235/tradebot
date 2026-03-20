@@ -1,0 +1,19 @@
+[Unit]
+Description=Tradebot Dashboard
+After=network-online.target tradebot.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/YOUR_USER/tradebot
+ExecStart=/home/YOUR_USER/tradebot/venv/bin/python dashboard/server.py --port 8080
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+User=YOUR_USER
+Group=YOUR_USER
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

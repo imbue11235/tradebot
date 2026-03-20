@@ -1,0 +1,94 @@
+# ─────────────────────────────────────────────
+#  TRADEBOT CONFIGURATION
+#  Set paper_trading: true to simulate safely.
+#  Flip to false only when you're ready for live.
+# ─────────────────────────────────────────────
+
+# ── Alpaca ────────────────────────────────────
+alpaca:
+  api_key: "PKTQ6V7B2GU3OB5DHSZ2EHMDMM"
+  api_secret: "H78CNpeYCaURHrqVyxRpC8wQYfCnN7topfKUj1eBqjYy"
+  paper_trading: true          # true = paper, false = live
+
+# ── Budget ────────────────────────────────────
+budget:
+  max_total_usd: 100000         # Hard cap — bot never exceeds this
+  reserve_pct: 0.05            # Keep 5% cash as buffer (covers fees)
+  max_open_positions: 8        # Max concurrent holdings
+
+# ── Position sizing (confidence-scaled) ───────
+sizing:
+  # Confidence tiers map sentiment score → % of available budget
+  # Score range: 0.0 (neutral) → 1.0 (max conviction)
+  tiers:
+    - min_score: 0.75
+      max_score: 1.00
+      budget_pct: 0.10         # High conviction  → up to 10% of budget
+    - min_score: 0.55
+      max_score: 0.75
+      budget_pct: 0.05         # Medium conviction → up to 5%
+    - min_score: 0.40
+      max_score: 0.55
+      budget_pct: 0.02         # Low conviction    → up to 2%
+  min_trade_usd: 20            # Never trade below this (fees would eat it)
+
+# ── Risk management ───────────────────────────
+risk:
+  stop_loss_pct: 0.025         # Exit if position drops 2.5%
+  take_profit_pct: 0.04        # Exit if position gains 4%
+  max_daily_loss_pct: 0.05     # Halt trading if daily loss exceeds 5%
+  trade_only_market_hours: true
+  avoid_first_minutes: 15      # Skip first 15 min of session (volatile open)
+  avoid_last_minutes: 10       # Skip last 10 min (illiquid close)
+
+# ── Fees (factored into every trade decision) ─
+fees:
+  commission_per_trade_usd: 0.00    # Alpaca is commission-free
+  sec_fee_per_dollar: 0.0000278     # SEC Section 31 fee (sell side only)
+  finra_taf_per_share: 0.000166     # FINRA TAF (sell side, max $8.30)
+  finra_taf_max_usd: 8.30
+  # Currency note: Alpaca trades in USD. If your account base currency
+  # differs, set conversion_fee_pct to your bank's FX spread.
+  currency_conversion_fee_pct: 0.0025  # e.g. 0.25% for DKK→USD
+
+# ── News & Sentiment ──────────────────────────
+news:
+  # Alpaca News is built-in. Optionally add NewsAPI for broader coverage.
+  newsapi_key: "29a9e30adbb1432bb0965c7ef3266568"              # Optional: get free key at newsapi.org
+  finnhub_key: "d6uh9phr01qp1k9chlvgd6uh9phr01qp1k9chm00"              # Optional: get free key at finnhub.io
+  lookback_minutes: 60         # How far back to scan for news
+  min_articles_for_signal: 1   # Min articles needed before acting
+  sentiment_threshold: 0.40    # Min score to even consider a trade
+
+# ── Universe ──────────────────────────────────
+universe:
+  # Watchlist: bot only trades these tickers.
+  # Keep it focused — sentiment works best on liquid, news-driven stocks.
+  watchlist:
+    - AAPL
+    - MSFT
+    - GOOGL
+    - AMZN
+    - NVDA
+    - TSLA
+    - META
+    - AMD
+    - JPM
+    - SPY
+  # Bot will also opportunistically trade any ticker appearing in
+  # strong news signals even if not on watchlist:
+  allow_opportunistic: true
+  opportunistic_min_score: 0.80   # Only act on very strong signals
+
+# ── Telegram reporting ────────────────────────
+telegram:
+  bot_token: "8349402440:AAFruvTUbzkhLK7leaTjGZcdvi4eQcU0GyA"
+  chat_id: "-5289574499"
+  report_interval_hours: 12
+  report_on_trade: true        # Also send message on each trade executed
+
+# ── Logging ───────────────────────────────────
+logging:
+  log_dir: "./logs"
+  log_level: "INFO"            # DEBUG / INFO / WARNING / ERROR
+  trade_log_csv: "./logs/trades.csv"
