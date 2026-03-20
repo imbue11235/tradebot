@@ -11,6 +11,8 @@ Strategy:
     - Per-position max (budget / max_open_positions)
     - Min trade size (to avoid fee erosion)
     - Available cash (never trade what you don't have)
+    - fractional_shares flag — if True, allows sub-share quantities (e.g. 0.05)
+      which removes the price floor entirely and makes any budget viable
 """
 
 import logging
@@ -19,7 +21,7 @@ logger = logging.getLogger("tradebot")
 
 
 class PositionSizer:
-    def __init__(self, sizing_cfg: dict, budget_cfg: dict, fee_calc):
+    def __init__(self, sizing_cfg: dict, budget_cfg: dict, fee_calc, fractional: bool = False):
         self.tiers = sorted(
             sizing_cfg.get("tiers", []),
             key=lambda t: t["min_score"],
@@ -30,6 +32,7 @@ class PositionSizer:
         self.reserve_pct = budget_cfg.get("reserve_pct", 0.05)
         self.max_positions = budget_cfg.get("max_open_positions", 8)
         self.fee_calc = fee_calc
+        self.fractional = fractional
 
     def compute_shares(
         self,
@@ -37,9 +40,10 @@ class PositionSizer:
         price: float,
         available_cash: float,
         open_positions: int,
-    ) -> tuple[int, float, str]:
+    ) -> tuple[float, float, str]:
         """
         Returns (shares_to_buy, allocated_usd, reason_string).
+        shares_to_buy is an int if fractional=False, float if fractional=True.
         Returns (0, 0, reason) if the trade should be skipped.
         """
         # Respect budget hard cap
@@ -57,15 +61,22 @@ class PositionSizer:
             return 0, 0.0, f"confidence {confidence:.2f} below all tiers"
 
         target_usd = spendable * budget_pct
-        target_usd = min(target_usd, slot_max)  # cap to slot
+        target_usd = min(target_usd, slot_max)       # cap to slot
         target_usd = min(target_usd, available_cash * 0.95)  # never go all-in
 
         if target_usd < self.min_trade_usd:
             return 0, 0.0, f"position too small (${target_usd:.2f} < min ${self.min_trade_usd})"
 
-        shares = int(target_usd / price)
-        if shares < 1:
-            return 0, 0.0, f"price ${price:.2f} too high for budget ${target_usd:.2f}"
+        if self.fractional:
+            # Allow fractional shares — round to 6 decimal places (Alpaca's limit)
+            shares = round(target_usd / price, 6)
+            if shares <= 0:
+                return 0, 0.0, f"computed fractional share quantity is zero"
+        else:
+            # Whole shares only
+            shares = int(target_usd / price)
+            if shares < 1:
+                return 0, 0.0, f"price ${price:.2f} too high for budget ${target_usd:.2f} (tip: set fractional_shares: true)"
 
         actual_usd = shares * price
 
@@ -73,9 +84,10 @@ class PositionSizer:
         if not self.fee_calc.is_trade_viable(shares, price, 0.04, confidence):
             return 0, 0.0, "fees would consume >50% of expected gain"
 
+        frac_note = " (fractional)" if self.fractional and shares != int(shares) else ""
         reason = (
             f"confidence={confidence:.2f} → tier {budget_pct*100:.0f}% of budget → "
-            f"{shares} shares @ ${price:.2f} = ${actual_usd:.2f}"
+            f"{shares}{frac_note} shares @ ${price:.2f} = ${actual_usd:.2f}"
         )
         return shares, actual_usd, reason
 

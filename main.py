@@ -53,7 +53,8 @@ def main():
     # ── Build components ──────────────────────────────────────────────────
     broker = Broker(cfg)
     fee_calc = FeeCalculator(cfg["fees"])
-    sizer = PositionSizer(cfg["sizing"], cfg["budget"], fee_calc)
+    fractional = cfg.get("fractional_shares", False)
+    sizer = PositionSizer(cfg["sizing"], cfg["budget"], fee_calc, fractional=fractional)
     risk = RiskManager(cfg["risk"], broker)
     reporter = TelegramReporter(cfg["telegram"])
     strategy = SentimentStrategy(cfg["news"], broker.news_client, cfg["universe"])

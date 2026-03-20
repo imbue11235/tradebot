@@ -91,15 +91,17 @@ class Broker:
 
     # ── Orders ─────────────────────────────────────────────────────────────
 
-    def buy(self, ticker: str, shares: int) -> Optional[dict]:
-        """Place a market buy order. Returns order info or None on failure."""
-        if shares < 1:
+    def buy(self, ticker: str, shares: float) -> Optional[dict]:
+        """Place a market buy order. Accepts int (whole) or float (fractional) shares."""
+        if shares <= 0:
             logger.warning(f"buy() called with shares={shares}, skipping")
             return None
+        # Fractional orders must use TimeInForce.DAY and qty as float
+        qty = shares  # Alpaca accepts float for fractional
         try:
             req = MarketOrderRequest(
                 symbol=ticker,
-                qty=shares,
+                qty=qty,
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce.DAY,
             )

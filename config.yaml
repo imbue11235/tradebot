@@ -14,6 +14,7 @@ budget:
   max_total_usd: 10000         # Hard cap — bot never exceeds this
   reserve_pct: 0.05            # Keep 5% cash as buffer (covers fees)
   max_open_positions: 8        # Max concurrent holdings
+                               # ↑ Lower to 3 if running with ~$100
 
 # ── Position sizing (confidence-scaled) ───────
 sizing:
@@ -27,7 +28,7 @@ sizing:
     - min_score: 0.40
       max_score: 0.55
       budget_pct: 0.02         # Low conviction    → up to 2%
-  min_trade_usd: 20            # Never trade below this (fees would eat it)
+  min_trade_usd: 20            # Lower to 5 if running with ~$100 budget
 
 # ── Risk management ───────────────────────────
 risk:
@@ -54,20 +55,62 @@ news:
   sentiment_threshold: 0.40
 
 # ── Universe ──────────────────────────────────
+# Tickers are grouped by sector/theme.
+# All share the same selection criteria:
+#   - High daily news volume (many articles = better FinBERT averaging)
+#   - Large market cap (liquid, tight spreads, fast price reaction to news)
+#   - Strong news-price correlation (market moves visibly on headlines)
+#   - Affordable price (most are under $250, so a $10 position = at least 1 share
+#     if using fractional, or viable at $20+ min_trade_usd for whole shares)
+#
+# NOTE ON PRICE vs BUDGET:
+#   The bot buys whole shares only. If (budget_pct × available_cash) / price < 1,
+#   the trade is skipped. With a small budget (e.g. $100), high-priced stocks like
+#   NVDA ($130+) or AVGO ($200+) may be unreachable on low-conviction tiers.
+#   The bot handles this gracefully — it skips and logs, never errors.
+#   Alpaca supports fractional shares; set fractional: true below to enable.
+#
+fractional_shares: false       # Set true to allow fractional share purchases.
+                               # Removes the price floor problem entirely for any budget.
+
 universe:
   watchlist:
-    - AAPL
-    - MSFT
-    - GOOGL
-    - AMZN
-    - NVDA
-    - TSLA
-    - META
-    - AMD
-    - JPM
-    - SPY
+    # ── Mega-cap tech (highest news volume, fastest price reaction) ──────
+    - AAPL    # Apple          ~$210  — product launches, regulatory, earnings
+    - MSFT    # Microsoft      ~$415  — Azure, AI (Copilot/OpenAI), enterprise
+    - GOOGL   # Alphabet       ~$170  — ads, AI (Gemini), antitrust, cloud
+    - AMZN    # Amazon         ~$185  — AWS, retail, logistics, Alexa/AI
+    - META    # Meta           ~$560  — ad revenue, Llama/AI, regulation
+    - NVDA    # Nvidia         ~$130  — AI chips, data center, export controls
+
+    # ── High-beta tech (volatile, news-reactive, lower price) ────────────
+    - AMD     # AMD            ~$120  — CPU/GPU competition with Intel/Nvidia
+    - TSLA    # Tesla          ~$250  — Musk news, EV sales, FSD/autonomy
+    - PLTR    # Palantir       ~$80   — government contracts, AI platform
+    - CRWD    # CrowdStrike    ~$370  — cybersecurity incidents, contracts
+
+    # ── Semiconductors (heavily covered, supply-chain sensitive) ─────────
+    - AVGO    # Broadcom       ~$215  — AI chip deals, VMware integration
+    - TSM     # TSMC           ~$175  — foundry capacity, geopolitics (Taiwan)
+    - QCOM    # Qualcomm       ~$155  — mobile chips, auto, licensing disputes
+
+    # ── Cloud & enterprise software (earnings-driven, stable coverage) ───
+    - CRM     # Salesforce     ~$290  — AI CRM, enterprise deals, earnings
+    - SNOW    # Snowflake      ~$155  — data cloud, AI partnerships
+    - NET     # Cloudflare     ~$115  — security, AI inference edge
+
+    # ── Financials (reacts to Fed news, rates, macro — decorrelates tech) ─
+    - JPM     # JPMorgan       ~$240  — Fed decisions, credit, M&A
+    - GS      # Goldman Sachs  ~$555  — IPOs, trading revenue, macro
+    - BAC     # Bank of America ~$45  — consumer credit, rates (affordable!)
+
+    # ── ETFs (broad market sentiment, useful for macro signal reading) ────
+    - SPY     # S&P 500 ETF    ~$580  — overall market direction
+    - QQQ     # Nasdaq 100 ETF ~$490  — tech-heavy market sentiment
+    - XLF     # Financials ETF ~$50   — sector-wide financial news signal
+
   allow_opportunistic: true
-  opportunistic_min_score: 0.80
+  opportunistic_min_score: 0.80   # Only act on very strong off-watchlist signals
 
 # ── Telegram reporting ────────────────────────
 # Token and chat_id loaded from .env: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
