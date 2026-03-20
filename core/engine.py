@@ -8,6 +8,9 @@ Runs continuously. Each iteration:
   4. For each signal: size, check viability, execute buy
   5. Periodic daily loss check
   6. Periodic status reports via Telegram
+
+Crash-hardened via checkpoint.py — all volatile state is saved to
+logs/checkpoint.json after every tick and restored on startup.
 """
 
 import logging
@@ -16,6 +19,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from core.checkpoint import Checkpoint
 
 logger = logging.getLogger("tradebot")
 
@@ -32,37 +37,44 @@ class TradingEngine:
         self.trade_logger = trade_logger
         self._last_signals: list = []
 
+        log_dir = cfg.get("logging", {}).get("log_dir", "./logs")
+        self.checkpoint = Checkpoint(log_dir)
+
         try:
             from dashboard.state_writer import StateWriter
-            log_dir = cfg.get("logging", {}).get("log_dir", "./logs")
             self._state_writer = StateWriter(log_dir)
         except Exception:
             self._state_writer = None
 
         self.budget_max = cfg["budget"]["max_total_usd"]
-        self.scan_interval_sec = 60          # Scan for news every 60 seconds
-        self.risk_check_interval_sec = 30    # Check positions every 30 seconds
+        self.scan_interval_sec = 60
+        self.risk_check_interval_sec = 30
         self.report_interval_sec = cfg["telegram"]["report_interval_hours"] * 3600
 
+        # These will be overwritten by _restore_or_init()
         self._last_report_time = datetime.now(timezone.utc) - timedelta(hours=11)
         self._last_risk_check = datetime.now(timezone.utc)
         self._last_news_scan = datetime.now(timezone.utc) - timedelta(minutes=2)
-        self._positions_metadata: dict = {}  # ticker → {confidence, headline, entry_price, entry_time}
+        self._positions_metadata: dict = {}
         self._realised_pnl_today: float = 0.0
         self._day_date: Optional[str] = None
 
+        # Session window state — tracks open/close alert transitions
+        self._session_state: str = "unknown"  # "unknown" | "open" | "closed"
+
+    # ── Startup ───────────────────────────────────────────────────────────
+
     def run(self):
-        """Blocking main loop. Run this in a terminal or via systemd."""
         logger.info("=" * 55)
         logger.info("  TRADEBOT ENGINE STARTING")
         logger.info("=" * 55)
 
-        # Startup
         account = self.broker.get_account()
-        self.risk.record_day_start(account["equity"])
-        self._day_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        self.reporter.startup_message(account, self.budget_max, self.broker.paper)
+        restarted = self._restore_or_init(account)
 
+        self.reporter.startup_message(
+            account, self.budget_max, self.broker.paper, restarted=restarted
+        )
         logger.info(f"Account equity: ${account['equity']:,.2f} | Budget cap: ${self.budget_max:,.2f}")
         logger.info(f"Market open: {self.broker.is_market_open()}")
 
@@ -72,11 +84,79 @@ class TradingEngine:
             except KeyboardInterrupt:
                 logger.info("Shutdown requested. Closing positions...")
                 self._close_all_positions("manual shutdown")
+                self.checkpoint.delete()
                 logger.info("Goodbye.")
                 break
             except Exception as e:
                 logger.error(f"Unhandled error in main loop: {e}", exc_info=True)
+                self._save_checkpoint()  # always checkpoint before sleeping on error
                 time.sleep(10)
+
+    def _restore_or_init(self, account: dict) -> bool:
+        """
+        Try to restore state from checkpoint. Returns True if restored.
+        Falls back to fresh init if checkpoint is missing/stale/corrupt.
+        """
+        state = self.checkpoint.load()
+
+        if state is not None:
+            # Restore all volatile state
+            self._day_date = state["day_date"]
+            self._realised_pnl_today = state["realised_pnl_today"]
+            self._positions_metadata = state["positions_metadata"]
+            self.strategy._seen_article_ids = state["seen_article_ids"]
+
+            if state.get("last_report_time"):
+                self._last_report_time = state["last_report_time"]
+
+            # Restore risk manager state
+            self.risk._day_start_equity = state["day_start_equity"]
+            if state["is_halted"]:
+                self.risk._halted = True
+                self.risk._halt_reason = state["halt_reason"]
+                logger.warning(f"Restored HALTED state: {state['halt_reason']}")
+
+            # Reconcile: warn if Alpaca has positions we lost metadata for
+            open_positions = self.broker.get_open_positions()
+            open_tickers = {p["ticker"] for p in open_positions}
+            tracked = set(self._positions_metadata.keys())
+            untracked = open_tickers - tracked
+            if untracked:
+                logger.warning(
+                    f"Open positions with no metadata (will use broker entry price): {untracked}"
+                )
+
+            logger.info(
+                f"Resumed from checkpoint | "
+                f"P&L today: ${self._realised_pnl_today:+.2f} | "
+                f"day start equity: ${self.risk._day_start_equity:,.2f}"
+            )
+            return True
+
+        else:
+            # Fresh start
+            self._day_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            self._realised_pnl_today = 0.0
+            self._positions_metadata = {}
+            self.risk.record_day_start(account["equity"])
+            logger.info("Fresh start — no checkpoint to restore.")
+            return False
+
+    # ── Checkpoint save ───────────────────────────────────────────────────
+
+    def _save_checkpoint(self):
+        self.checkpoint.save(
+            day_date=self._day_date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            day_start_equity=self.risk._day_start_equity or 0.0,
+            realised_pnl_today=self._realised_pnl_today,
+            positions_metadata=self._positions_metadata,
+            seen_article_ids=self.strategy._seen_article_ids,
+            is_halted=self.risk.is_halted,
+            halt_reason=self.risk.halt_reason,
+            last_report_time=self._last_report_time,
+        )
+
+    # ── Main tick ─────────────────────────────────────────────────────────
 
     def _tick(self):
         now = datetime.now(timezone.utc)
@@ -88,7 +168,10 @@ class TradingEngine:
             account = self.broker.get_account()
             self.risk.record_day_start(account["equity"])
             self._realised_pnl_today = 0.0
-            logger.info(f"New trading day: {today}")
+            self._positions_metadata = {}
+            self.strategy._seen_article_ids = set()
+            logger.info(f"New trading day: {today} | Start equity: ${account['equity']:,.2f}")
+            self._save_checkpoint()
 
         # ── Periodic risk check ────────────────────────────────────────────
         if (now - self._last_risk_check).total_seconds() >= self.risk_check_interval_sec:
@@ -101,14 +184,42 @@ class TradingEngine:
             if not self.risk.check_daily_loss(account["equity"]):
                 self.reporter.halt_alert(self.risk.halt_reason)
                 self._close_all_positions("daily loss limit hit")
+                self._save_checkpoint()
 
         # ── Status report ─────────────────────────────────────────────────
         if (now - self._last_report_time).total_seconds() >= self.report_interval_sec:
             self._last_report_time = now
             self._send_status_report()
+            self._save_checkpoint()
+
+        # ── Session window open/close alerts ────────────────────────────────
+        can_trade, reason = self.risk.can_trade()
+        new_session_state = "open" if can_trade else "closed"
+        if self._session_state != new_session_state:
+            if new_session_state == "open" and self._session_state != "unknown":
+                # Transition: closed → open (market opened + buffer elapsed)
+                account = self.broker.get_account()
+                open_count = len(self.broker.get_open_positions())
+                logger.info("Trading session OPEN — scanning news")
+                self.reporter.session_open(
+                    equity=account["equity"],
+                    open_positions=open_count,
+                    is_paper=self.broker.paper,
+                )
+            elif new_session_state == "closed" and self._session_state == "open":
+                # Transition: open → closed (approaching market close or market closed)
+                account = self.broker.get_account()
+                trades_today = self.broker.get_closed_orders_today()
+                logger.info(f"Trading session CLOSED — reason: {reason}")
+                self.reporter.session_close(
+                    equity=account["equity"],
+                    daily_pnl=self._realised_pnl_today,
+                    trades_today=len(trades_today),
+                    is_paper=self.broker.paper,
+                )
+            self._session_state = new_session_state
 
         # ── News scan ─────────────────────────────────────────────────────
-        can_trade, reason = self.risk.can_trade()
         if (now - self._last_news_scan).total_seconds() >= self.scan_interval_sec:
             self._last_news_scan = now
             if can_trade:
@@ -116,10 +227,14 @@ class TradingEngine:
             else:
                 logger.debug(f"Skipping news scan: {reason}")
 
+        # ── Checkpoint every tick ──────────────────────────────────────────
+        self._save_checkpoint()
+
         time.sleep(5)
 
+    # ── Position monitoring ───────────────────────────────────────────────
+
     def _check_positions(self):
-        """Monitor all open positions for stop/profit triggers."""
         positions = self.broker.get_open_positions()
         for pos in positions:
             ticker = pos["ticker"]
@@ -128,8 +243,9 @@ class TradingEngine:
                 logger.info(f"Exiting {ticker}: {reason}")
                 self._close_position(ticker, pos, reason)
 
+    # ── News scan & trade ─────────────────────────────────────────────────
+
     def _scan_and_trade(self):
-        """Fetch news signals and execute buys."""
         open_positions = self.broker.get_open_positions()
         open_tickers = {p["ticker"] for p in open_positions}
         open_count = len(open_positions)
@@ -149,18 +265,15 @@ class TradingEngine:
         for signal in signals:
             ticker = signal.ticker
 
-            # Skip if we already hold this
             if ticker in open_tickers:
                 logger.debug(f"Already holding {ticker}, skipping signal.")
                 continue
 
-            # Get current price
             price = self.broker.get_latest_price(ticker)
             if not price:
                 logger.warning(f"Couldn't get price for {ticker}, skipping.")
                 continue
 
-            # Size the trade
             shares, allocated_usd, size_reason = self.sizer.compute_shares(
                 confidence=signal.score,
                 price=price,
@@ -172,7 +285,6 @@ class TradingEngine:
                 logger.info(f"Skipping {ticker}: {size_reason}")
                 continue
 
-            # Fee estimate
             est_exit = price * (1 + self.cfg["risk"]["take_profit_pct"])
             fee_est = self.fee_calc.estimate_round_trip(shares, price, est_exit)
 
@@ -180,7 +292,6 @@ class TradingEngine:
                 f"Executing BUY: {shares}x {ticker} @ ~${price:.2f} | {size_reason} | {fee_est}"
             )
 
-            # Execute
             order = self.broker.buy(ticker, shares)
             if order:
                 self._positions_metadata[ticker] = {
@@ -204,9 +315,11 @@ class TradingEngine:
                     headline=signal.headline,
                     fees=fee_est.total,
                 )
+                self._save_checkpoint()  # checkpoint immediately after each buy
+
+    # ── Position closing ──────────────────────────────────────────────────
 
     def _close_position(self, ticker: str, position: dict, reason: str):
-        """Close a position and log the result."""
         meta = self._positions_metadata.get(ticker, {})
         entry_price = meta.get("entry_price", position["entry_price"])
         shares = position["qty"]
@@ -217,7 +330,9 @@ class TradingEngine:
         net_pnl = gross_pnl - fee_est.total
         hold_minutes = 0
         if "entry_time" in meta:
-            hold_minutes = int((datetime.now(timezone.utc) - meta["entry_time"]).total_seconds() / 60)
+            hold_minutes = int(
+                (datetime.now(timezone.utc) - meta["entry_time"]).total_seconds() / 60
+            )
 
         order = self.broker.close_position(ticker)
         if order:
@@ -245,10 +360,13 @@ class TradingEngine:
                 "hold_minutes": hold_minutes,
             })
             self._positions_metadata.pop(ticker, None)
+            self._save_checkpoint()  # checkpoint immediately after each sell
 
     def _close_all_positions(self, reason: str):
         for pos in self.broker.get_open_positions():
             self._close_position(pos["ticker"], pos, reason)
+
+    # ── Status report ─────────────────────────────────────────────────────
 
     def _send_status_report(self):
         account = self.broker.get_account()

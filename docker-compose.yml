@@ -1,0 +1,36 @@
+services:
+
+  # ── Trading bot ───────────────────────────────────────────────────────────
+  bot:
+    build: .
+    container_name: tradebot
+    restart: unless-stopped
+    env_file: .env                        # All secrets injected from .env
+    volumes:
+      - ./logs:/app/logs                  # Persist logs + checkpoint across restarts
+    command: python main.py
+
+  # ── Dashboard (Flask) ─────────────────────────────────────────────────────
+  dashboard:
+    build: .
+    container_name: tradebot-dashboard
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs                  # Shared with bot — reads same state files
+    command: python dashboard/server.py --host 0.0.0.0 --port 8080
+    expose:
+      - "8080"                            # Internal only — nginx handles public access
+
+  # ── Nginx (reverse proxy + basic auth) ───────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: tradebot-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"                           # Change to "443:443" if you add TLS
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+    depends_on:
+      - dashboard

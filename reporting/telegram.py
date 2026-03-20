@@ -133,15 +133,18 @@ class TelegramReporter:
         )
         self.send(msg)
 
-    def startup_message(self, account: dict, budget_max: float, is_paper: bool):
+    def startup_message(self, account: dict, budget_max: float, is_paper: bool, restarted: bool = False):
         mode = "📄 PAPER TRADING" if is_paper else "🔴 LIVE TRADING"
+        icon = "🔄" if restarted else "🤖"
+        title = "TRADEBOT RESUMED" if restarted else "TRADEBOT STARTED"
+        note = "State restored from checkpoint — continuing where I left off." if restarted else "I will send trade alerts and status reports every 12 hours. 📬"
         msg = (
-            f"🤖 <b>TRADEBOT STARTED</b> [{mode}]\n"
+            f"{icon} <b>{title}</b> [{mode}]\n"
             f"  Equity: ${account.get('equity', 0):,.2f}\n"
             f"  Budget cap: ${budget_max:,.2f}\n"
             f"  Strategy: News/Sentiment (FinBERT)\n"
             f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-            f"I will send trade alerts and status reports every 12 hours. 📬"
+            f"{note}"
         )
         self.send(msg)
 
@@ -151,4 +154,34 @@ class TelegramReporter:
             f"  Reason: {reason}\n"
             f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
             f"No further trades will be placed until the next trading day."
+        )
+
+    def session_open(self, equity: float, open_positions: int, is_paper: bool):
+        """Sent when the trading window opens (market open + 15min buffer)."""
+        mode = "📄 PAPER" if is_paper else "💵 LIVE"
+        self.send(
+            f"🔔 <b>TRADING SESSION OPEN</b> [{mode}]\n"
+            f"  Market open buffer elapsed — actively scanning news\n"
+            f"  Equity: ${equity:,.2f}\n"
+            f"  Open positions carried over: {open_positions}\n"
+            f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+
+    def session_close(
+        self,
+        equity: float,
+        daily_pnl: float,
+        trades_today: int,
+        is_paper: bool,
+    ):
+        """Sent when the trading window closes (10min before market close)."""
+        mode = "📄 PAPER" if is_paper else "💵 LIVE"
+        pnl_emoji = "📈" if daily_pnl >= 0 else "📉"
+        self.send(
+            f"{pnl_emoji} <b>TRADING SESSION CLOSED</b> [{mode}]\n"
+            f"  Closing all positions — market close in ~10 min\n"
+            f"  Trades today: {trades_today}\n"
+            f"  Realised P&amp;L today: <b>${daily_pnl:+,.2f}</b>\n"
+            f"  Equity: ${equity:,.2f}\n"
+            f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         )

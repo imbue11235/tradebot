@@ -1,25 +1,22 @@
 # ─────────────────────────────────────────────
 #  TRADEBOT CONFIGURATION
-#  Set paper_trading: true to simulate safely.
-#  Flip to false only when you're ready for live.
+#  Secrets (API keys) live in .env — not here.
+#  Copy .env.example to .env and fill it in.
 # ─────────────────────────────────────────────
 
 # ── Alpaca ────────────────────────────────────
+# Keys loaded from .env: ALPACA_API_KEY / ALPACA_API_SECRET
 alpaca:
-  api_key: "PKTQ6V7B2GU3OB5DHSZ2EHMDMM"
-  api_secret: "H78CNpeYCaURHrqVyxRpC8wQYfCnN7topfKUj1eBqjYy"
   paper_trading: true          # true = paper, false = live
 
 # ── Budget ────────────────────────────────────
 budget:
-  max_total_usd: 100000         # Hard cap — bot never exceeds this
+  max_total_usd: 10000         # Hard cap — bot never exceeds this
   reserve_pct: 0.05            # Keep 5% cash as buffer (covers fees)
   max_open_positions: 8        # Max concurrent holdings
 
 # ── Position sizing (confidence-scaled) ───────
 sizing:
-  # Confidence tiers map sentiment score → % of available budget
-  # Score range: 0.0 (neutral) → 1.0 (max conviction)
   tiers:
     - min_score: 0.75
       max_score: 1.00
@@ -47,23 +44,17 @@ fees:
   sec_fee_per_dollar: 0.0000278     # SEC Section 31 fee (sell side only)
   finra_taf_per_share: 0.000166     # FINRA TAF (sell side, max $8.30)
   finra_taf_max_usd: 8.30
-  # Currency note: Alpaca trades in USD. If your account base currency
-  # differs, set conversion_fee_pct to your bank's FX spread.
   currency_conversion_fee_pct: 0.0025  # e.g. 0.25% for DKK→USD
 
 # ── News & Sentiment ──────────────────────────
+# Optional extra keys loaded from .env: NEWSAPI_KEY / FINNHUB_KEY
 news:
-  # Alpaca News is built-in. Optionally add NewsAPI for broader coverage.
-  newsapi_key: "29a9e30adbb1432bb0965c7ef3266568"              # Optional: get free key at newsapi.org
-  finnhub_key: "d6uh9phr01qp1k9chlvgd6uh9phr01qp1k9chm00"              # Optional: get free key at finnhub.io
-  lookback_minutes: 60         # How far back to scan for news
-  min_articles_for_signal: 1   # Min articles needed before acting
-  sentiment_threshold: 0.40    # Min score to even consider a trade
+  lookback_minutes: 60
+  min_articles_for_signal: 1
+  sentiment_threshold: 0.40
 
 # ── Universe ──────────────────────────────────
 universe:
-  # Watchlist: bot only trades these tickers.
-  # Keep it focused — sentiment works best on liquid, news-driven stocks.
   watchlist:
     - AAPL
     - MSFT
@@ -75,17 +66,14 @@ universe:
     - AMD
     - JPM
     - SPY
-  # Bot will also opportunistically trade any ticker appearing in
-  # strong news signals even if not on watchlist:
   allow_opportunistic: true
-  opportunistic_min_score: 0.80   # Only act on very strong signals
+  opportunistic_min_score: 0.80
 
 # ── Telegram reporting ────────────────────────
+# Token and chat_id loaded from .env: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
 telegram:
-  bot_token: "8349402440:AAFruvTUbzkhLK7leaTjGZcdvi4eQcU0GyA"
-  chat_id: "-5289574499"
   report_interval_hours: 12
-  report_on_trade: true        # Also send message on each trade executed
+  report_on_trade: true
 
 # ── Logging ───────────────────────────────────
 logging:
