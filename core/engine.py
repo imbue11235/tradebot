@@ -78,6 +78,9 @@ class TradingEngine:
         logger.info(f"Account equity: ${account['equity']:,.2f} | Budget cap: ${self.budget_max:,.2f}")
         logger.info(f"Market open: {self.broker.is_market_open()}")
 
+        # Start Telegram command listener in background thread
+        self.reporter.start_listener(on_status=self._send_status_report)
+
         while True:
             try:
                 self._tick()
@@ -92,17 +95,45 @@ class TradingEngine:
                 self._save_checkpoint()  # always checkpoint before sleeping on error
                 time.sleep(10)
 
+    def _recalc_pnl_from_csv(self) -> float:
+        """
+        Re-derive today's realised P&L by summing net_pnl from trades.csv.
+        This is always authoritative — used instead of the checkpoint value
+        to prevent stale or incorrect P&L figures surviving restarts.
+        """
+        import csv
+        from pathlib import Path
+        log_dir = self.cfg.get("logging", {}).get("log_dir", "./logs")
+        csv_path = Path(self.cfg.get("logging", {}).get("trade_log_csv", f"{log_dir}/trades.csv"))
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        total = 0.0
+        if not csv_path.exists():
+            return total
+        try:
+            with open(csv_path, newline="") as f:
+                for row in csv.DictReader(f):
+                    # Only count sell rows from today
+                    ts = row.get("timestamp", "")
+                    if row.get("side") == "sell" and ts.startswith(today):
+                        try:
+                            total += float(row.get("net_pnl", 0) or 0)
+                        except ValueError:
+                            pass
+        except Exception as e:
+            logger.warning(f"Could not read trades CSV for P&L recalc: {e}")
+        return total
+
     def _restore_or_init(self, account: dict) -> bool:
         """
         Try to restore state from checkpoint. Returns True if restored.
         Falls back to fresh init if checkpoint is missing/stale/corrupt.
+        P&L is always recalculated from trades.csv — never trusted from checkpoint.
         """
         state = self.checkpoint.load()
 
         if state is not None:
             # Restore all volatile state
             self._day_date = state["day_date"]
-            self._realised_pnl_today = state["realised_pnl_today"]
             self._positions_metadata = state["positions_metadata"]
             self.strategy._seen_article_ids = state["seen_article_ids"]
 
@@ -126,9 +157,19 @@ class TradingEngine:
                     f"Open positions with no metadata (will use broker entry price): {untracked}"
                 )
 
+            # Always recalculate P&L from CSV — never trust checkpoint value
+            # This corrects any bad P&L figures that may have been persisted
+            csv_pnl = self._recalc_pnl_from_csv()
+            if abs(csv_pnl - state["realised_pnl_today"]) > 0.01:
+                logger.warning(
+                    f"P&L mismatch: checkpoint had ${state['realised_pnl_today']:+.2f}, "
+                    f"CSV recalculated ${csv_pnl:+.2f} — using CSV value"
+                )
+            self._realised_pnl_today = csv_pnl
+
             logger.info(
                 f"Resumed from checkpoint | "
-                f"P&L today: ${self._realised_pnl_today:+.2f} | "
+                f"P&L today (from CSV): ${self._realised_pnl_today:+.2f} | "
                 f"day start equity: ${self.risk._day_start_equity:,.2f}"
             )
             return True
@@ -169,7 +210,7 @@ class TradingEngine:
             self.risk.record_day_start(account["equity"])
             self._realised_pnl_today = 0.0
             self._positions_metadata = {}
-            self.strategy._seen_article_ids = set()
+            self.strategy._seen_article_ids = {}
             logger.info(f"New trading day: {today} | Start equity: ${account['equity']:,.2f}")
             self._save_checkpoint()
 
@@ -323,7 +364,15 @@ class TradingEngine:
         meta = self._positions_metadata.get(ticker, {})
         entry_price = meta.get("entry_price", position["entry_price"])
         shares = position["qty"]
-        exit_price = position["current_price"]
+
+        # Derive exit price from unrealized_pnl / qty rather than current_price.
+        # Alpaca's current_price field can return stale or incorrect values in
+        # paper trading — unrealized_pnl is always calculated correctly server-side.
+        unrealized_pnl = position.get("unrealized_pnl", 0.0)
+        if shares and shares != 0:
+            exit_price = entry_price + (unrealized_pnl / shares)
+        else:
+            exit_price = position["current_price"]  # fallback
 
         fee_est = self.fee_calc.estimate_round_trip(shares, entry_price, exit_price)
         gross_pnl = (exit_price - entry_price) * shares
@@ -339,7 +388,7 @@ class TradingEngine:
             self._realised_pnl_today += net_pnl
             self.reporter.exit_alert(
                 ticker=ticker,
-                shares=int(shares),
+                shares=shares,
                 entry=entry_price,
                 exit_price=exit_price,
                 net_pnl=net_pnl,

@@ -136,7 +136,7 @@ class Broker:
         for p in positions:
             result.append({
                 "ticker": p.symbol,
-                "qty": int(p.qty),
+                "qty": float(p.qty),
                 "entry_price": float(p.avg_entry_price),
                 "current_price": float(p.current_price),
                 "market_value": float(p.market_value),

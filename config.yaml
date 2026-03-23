@@ -39,18 +39,33 @@ risk:
   avoid_first_minutes: 15      # Skip first 15 min of session (volatile open)
   avoid_last_minutes: 10       # Skip last 10 min (illiquid close)
 
+  # ── Negative news exit ──────────────────────────────────────────────────
+  # If bad news hits a stock you're holding, exit immediately rather than
+  # waiting for the stop-loss to trigger. Uses the same FinBERT scoring.
+  negative_news_exit:
+    enabled: true
+    # Minimum absolute sentiment score to trigger an exit.
+    # Score is in [-1, 0]: -1 = maximally bearish, 0 = neutral.
+    # -0.60 = strong negative signal required (recommended starting point)
+    # -0.45 = more sensitive, exits on moderate bad news
+    # -0.75 = only exits on very strong negative news
+    min_score: -0.60
+    # Minimum number of negative articles needed to act.
+    # Prevents a single sensationalist headline from triggering an exit.
+    min_articles: 1
+
 # ── Fees (factored into every trade decision) ─
 fees:
   commission_per_trade_usd: 0.00    # Alpaca is commission-free
   sec_fee_per_dollar: 0.0000278     # SEC Section 31 fee (sell side only)
   finra_taf_per_share: 0.000166     # FINRA TAF (sell side, max $8.30)
   finra_taf_max_usd: 8.30
-  currency_conversion_fee_pct: 0.0025  # e.g. 0.25% for DKK→USD
+  currency_conversion_fee_pct: 0.00  # e.g. 0.25% for DKK→USD
 
 # ── News & Sentiment ──────────────────────────
-# Optional extra keys loaded from .env: NEWSAPI_KEY / FINNHUB_KEY
+# Optional: FINNHUB_KEY loaded from .env (real-time, free tier, 60 req/min)
 news:
-  lookback_minutes: 60
+  lookback_minutes: 120  # matches MAX_ARTICLE_AGE_MINUTES in sentiment.py
   min_articles_for_signal: 1
   sentiment_threshold: 0.40
 
@@ -70,7 +85,7 @@ news:
 #   The bot handles this gracefully — it skips and logs, never errors.
 #   Alpaca supports fractional shares; set fractional: true below to enable.
 #
-fractional_shares: false       # Set true to allow fractional share purchases.
+fractional_shares: true       # Set true to allow fractional share purchases.
                                # Removes the price floor problem entirely for any budget.
 
 universe:

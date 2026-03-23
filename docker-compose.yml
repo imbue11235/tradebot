@@ -5,9 +5,14 @@ services:
     build: .
     container_name: tradebot
     restart: unless-stopped
-    env_file: .env                        # All secrets injected from .env
+    env_file: .env
+    environment:
+      TRANSFORMERS_VERBOSITY: error
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      TOKENIZERS_PARALLELISM: "false"
     volumes:
-      - ./logs:/app/logs                  # Persist logs + checkpoint across restarts
+      - ./logs:/app/logs
+      - huggingface_cache:/root/.cache/huggingface
     command: python main.py
 
   # ── Dashboard (Flask) ─────────────────────────────────────────────────────
@@ -16,11 +21,22 @@ services:
     container_name: tradebot-dashboard
     restart: unless-stopped
     env_file: .env
+    environment:
+      TRANSFORMERS_VERBOSITY: error
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
     volumes:
-      - ./logs:/app/logs                  # Shared with bot — reads same state files
+      - ./logs:/app/logs
     command: python dashboard/server.py --host 0.0.0.0 --port 8080
     expose:
-      - "8080"                            # Internal only — nginx handles public access
+      - "8080"
+    healthcheck:
+      # Polls /healthz inside the container — nginx won't start until this passes
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 5s      # Check every 5 seconds
+      timeout: 3s       # Fail if no response within 3s
+      retries: 6        # Give Flask up to 30s to start before marking unhealthy
+      start_period: 10s # Grace period — don't count failures in first 10s
 
   # ── Nginx (reverse proxy + basic auth) ───────────────────────────────────
   nginx:
@@ -28,9 +44,18 @@ services:
     container_name: tradebot-nginx
     restart: unless-stopped
     ports:
-      - "80:80"                           # Change to "443:443" if you add TLS
+      - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
     depends_on:
-      - dashboard
+      dashboard:
+        condition: service_healthy   # Wait for dashboard health check to pass
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  huggingface_cache:

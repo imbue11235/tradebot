@@ -43,9 +43,10 @@ def _inject_env(cfg: dict):
     cfg["telegram"]["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     cfg["telegram"]["chat_id"]   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-    # Optional news keys
+    # Optional supplemental news key (Finnhub — real-time, free)
+    # NewsAPI removed: free tier has 24h delay, useless for day trading.
     cfg.setdefault("news", {})
-    cfg["news"]["newsapi_key"] = os.environ.get("NEWSAPI_KEY", "")
+    cfg["news"]["newsapi_key"] = ""  # disabled
     cfg["news"]["finnhub_key"] = os.environ.get("FINNHUB_KEY", "")
 
 

@@ -28,7 +28,15 @@ from typing import Optional
 
 logger = logging.getLogger("tradebot")
 
-CHECKPOINT_VERSION = 2
+CHECKPOINT_VERSION = 3
+
+
+def _parse_ts(ts: str) -> float:
+    """Parse ISO timestamp to unix float. Returns 0 on failure."""
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except Exception:
+        return 0.0
 
 
 class Checkpoint:
@@ -57,14 +65,27 @@ class Checkpoint:
                 m["entry_time"] = m["entry_time"].isoformat()
             serialised_meta[ticker] = m
 
+        # Prune seen_article_ids — only keep entries seen within the last 2 hours.
+        # seen_article_ids is either a plain set (legacy) or dict {id: iso_timestamp}.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cutoff = datetime.now(timezone.utc).timestamp() - (120 * 60)  # 2 hours ago
+        if isinstance(seen_article_ids, dict):
+            pruned = {
+                k: v for k, v in seen_article_ids.items()
+                if _parse_ts(v) >= cutoff
+            }
+        else:
+            # Legacy plain set — keep as-is, will upgrade on next save cycle
+            pruned = {k: now_iso for k in list(seen_article_ids)[-200:]}
+
         data = {
             "version": CHECKPOINT_VERSION,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "saved_at": now_iso,
             "day_date": day_date,
             "day_start_equity": day_start_equity,
             "realised_pnl_today": realised_pnl_today,
             "positions_metadata": serialised_meta,
-            "seen_article_ids": list(seen_article_ids)[-500:],  # cap to 500
+            "seen_article_ids": pruned,
             "is_halted": is_halted,
             "halt_reason": halt_reason,
             "last_report_time": last_report_time.isoformat(),
@@ -115,7 +136,13 @@ class Checkpoint:
         except Exception:
             data["last_report_time"] = None
 
-        data["seen_article_ids"] = set(data.get("seen_article_ids", []))
+        raw = data.get("seen_article_ids", {})
+        if isinstance(raw, list):
+            # Legacy format — convert to dict with current timestamp
+            now_iso = datetime.now(timezone.utc).isoformat()
+            data["seen_article_ids"] = {k: now_iso for k in raw}
+        else:
+            data["seen_article_ids"] = raw
 
         logger.info(
             f"Checkpoint restored from {data['saved_at']} | "

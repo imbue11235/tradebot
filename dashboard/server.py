@@ -129,6 +129,12 @@ def api_summary():
     })
 
 
+@app.route("/healthz")
+def healthz():
+    """Health check endpoint — used by Docker and nginx to confirm Flask is up."""
+    return "ok", 200
+
+
 @app.route("/")
 def index():
     return send_from_directory(Path(__file__).parent / "static", "index.html")

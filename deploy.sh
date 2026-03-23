@@ -89,6 +89,18 @@ fi
 mkdir -p logs
 info "Logs directory ready ✓"
 
+# ── Offer to clear corrupt checkpoint ─────────────────────────────────────────
+if [[ -f "logs/checkpoint.json" ]]; then
+    warn "Existing checkpoint found. Clear it for a clean P&L slate? (y/N)"
+    read -r -t 10 answer || answer="n"
+    if [[ "$(echo "$answer" | tr "[:upper:]" "[:lower:]")" == "y" ]]; then
+        rm logs/checkpoint.json
+        info "Checkpoint cleared ✓"
+    else
+        info "Keeping existing checkpoint."
+    fi
+fi
+
 # ── Build & start ─────────────────────────────────────────────────────────────
 info "Building Docker images (first build downloads FinBERT ~440MB, be patient)..."
 docker compose build --pull
