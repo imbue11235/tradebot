@@ -24,6 +24,7 @@ from core.sizer import PositionSizer
 from core.risk import RiskManager
 from core.engine import TradingEngine
 from strategies.sentiment import SentimentStrategy
+from strategies.orderflow import OrderFlowAnalyser
 from reporting.telegram import TelegramReporter
 
 
@@ -58,6 +59,7 @@ def main():
     risk = RiskManager(cfg["risk"], broker)
     reporter = TelegramReporter(cfg["telegram"])
     strategy = SentimentStrategy(cfg["news"], broker.news_client, cfg["universe"])
+    orderflow = OrderFlowAnalyser(cfg.get("order_flow_confirmation", {}), broker.data)
 
     # ── Status mode ───────────────────────────────────────────────────────
     if args.status:
@@ -84,6 +86,7 @@ def main():
         risk=risk,
         sizer=sizer,
         strategy=strategy,
+        orderflow=orderflow,
         reporter=reporter,
         fee_calc=fee_calc,
         trade_logger=trade_logger,

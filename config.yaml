@@ -127,6 +127,59 @@ universe:
   allow_opportunistic: true
   opportunistic_min_score: 0.80   # Only act on very strong off-watchlist signals
 
+# ── Order flow confirmation ───────────────────
+# Microstructure gate: news sentiment says buy → order flow must confirm.
+# Analyses the live tape (recent trades + order book) before executing.
+# Also vetoes negative news exits if order flow is actually bullish.
+#
+# HOW IT WORKS:
+#   delta      — aggressive buys vs sells in last N minutes (who's hitting?)
+#   imbalance  — bid size vs ask size right now (who's waiting?)
+#   absorption — is price NOT moving despite order pressure? (who's absorbing?)
+#
+# COMPOSITE SCORE: weighted sum of above, range [-1, +1]
+#   +1 = strong buying pressure
+#   -1 = strong selling pressure
+#    0 = neutral / balanced
+#
+order_flow_confirmation:
+  enabled: true
+
+  # ── Entry gate ─────────────────────────────────────────────────────────
+  # Minimum composite score to allow a buy. Range [0, 1].
+  # 0.15 = modest buy pressure required (recommended)
+  # 0.25 = stronger confirmation needed (fewer but higher quality entries)
+  # 0.05 = very permissive (almost always passes)
+  min_buy_score: 0.15
+
+  # ── Negative news exit veto ────────────────────────────────────────────
+  # If bad news hits a held stock but order flow is bullish (score >= this),
+  # the news exit is vetoed — institutions may be buying the dip.
+  # 0.20 = fairly confident buyers in control before vetoing a sell
+  min_sell_veto_score: 0.20
+
+  # ── Component weights (must sum to 1.0) ───────────────────────────────
+  weights:
+    delta:      0.50   # Most important — actual aggressive order flow
+    imbalance:  0.30   # Book pressure — leading indicator
+    absorption: 0.20   # Price vs pressure divergence
+
+  # ── Data settings ──────────────────────────────────────────────────────
+  # How many minutes of trade history to use for delta calculation.
+  # Shorter = more reactive. Longer = more stable but slower to update.
+  trade_window_minutes: 5
+
+  # Minimum trades needed to produce a valid signal.
+  # Low-volume stocks/times may not have enough data.
+  # Set lower (5) during pre/post market if needed.
+  min_trades: 10
+
+  # Absorption uses multiple snapshots to detect price vs pressure divergence.
+  # snapshots × interval_sec = total time spent on absorption check (e.g. 3×2=6s)
+  # Increase snapshots for more accuracy, decrease for faster execution.
+  absorption_snapshots: 3
+  absorption_interval_sec: 2
+
 # ── Telegram reporting ────────────────────────
 # Token and chat_id loaded from .env: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
 telegram:

@@ -26,7 +26,7 @@ logger = logging.getLogger("tradebot")
 
 
 class TradingEngine:
-    def __init__(self, cfg: dict, broker, risk, sizer, strategy, reporter, fee_calc, trade_logger):
+    def __init__(self, cfg: dict, broker, risk, sizer, strategy, orderflow, reporter, fee_calc, trade_logger):
         self.cfg = cfg
         self.broker = broker
         self.risk = risk
@@ -35,6 +35,7 @@ class TradingEngine:
         self.reporter = reporter
         self.fee_calc = fee_calc
         self.trade_logger = trade_logger
+        self.orderflow = orderflow
         self._last_signals: list = []
 
         log_dir = cfg.get("logging", {}).get("log_dir", "./logs")
@@ -47,6 +48,10 @@ class TradingEngine:
             self._state_writer = None
 
         self.budget_max = cfg["budget"]["max_total_usd"]
+        neg_cfg = cfg.get("risk", {}).get("negative_news_exit", {})
+        self._neg_news_enabled = neg_cfg.get("enabled", True)
+        self._neg_news_min_score = neg_cfg.get("min_score", -0.60)
+        self._neg_news_min_articles = neg_cfg.get("min_articles", 1)
         self.scan_interval_sec = 60
         self.risk_check_interval_sec = 30
         self.report_interval_sec = cfg["telegram"]["report_interval_hours"] * 3600
@@ -291,6 +296,13 @@ class TradingEngine:
         open_tickers = {p["ticker"] for p in open_positions}
         open_count = len(open_positions)
 
+        # ── Check held positions for negative news before buying anything new ──
+        if self._neg_news_enabled and open_positions:
+            self._check_negative_news(open_positions)
+            open_positions = self.broker.get_open_positions()
+            open_tickers = {p["ticker"] for p in open_positions}
+            open_count = len(open_positions)
+
         signals = self.strategy.fetch_signals()
         if signals:
             self._last_signals = (signals + self._last_signals)[:20]
@@ -329,8 +341,17 @@ class TradingEngine:
             est_exit = price * (1 + self.cfg["risk"]["take_profit_pct"])
             fee_est = self.fee_calc.estimate_round_trip(shares, price, est_exit)
 
+            # ── Order flow confirmation gate ──────────────────────────
+            of_result = self.orderflow.analyse(ticker)
+            if of_result is not None and not of_result.confirms_buy:
+                logger.info(
+                    f"BUY VETOED by order flow: {ticker} | {of_result.reason}"
+                )
+                continue
+            of_note = f"OF={of_result.score:+.2f}" if of_result else "OF=n/a"
             logger.info(
-                f"Executing BUY: {shares}x {ticker} @ ~${price:.2f} | {size_reason} | {fee_est}"
+                f"Executing BUY: {shares}x {ticker} @ ~${price:.2f} | "
+                f"{size_reason} | {fee_est} | {of_note}"
             )
 
             order = self.broker.buy(ticker, shares)
@@ -357,6 +378,45 @@ class TradingEngine:
                     fees=fee_est.total,
                 )
                 self._save_checkpoint()  # checkpoint immediately after each buy
+
+    # ── Negative news exit ───────────────────────────────────────────────────
+
+    def _check_negative_news(self, open_positions: list):
+        held_tickers = {p["ticker"] for p in open_positions}
+        neg_signals = self.strategy.fetch_negative_signals(
+            held_tickers=held_tickers,
+            min_score=self._neg_news_min_score,
+            min_articles=self._neg_news_min_articles,
+        )
+        if not neg_signals:
+            return
+
+        pos_by_ticker = {p["ticker"]: p for p in open_positions}
+        for ticker, (score, headline) in neg_signals.items():
+            pos = pos_by_ticker.get(ticker)
+            if not pos:
+                continue
+
+            # Order flow veto — if tape shows buyers absorbing the bad news, hold
+            of_result = self.orderflow.analyse(ticker)
+            if of_result is not None and of_result.confirms_sell_veto:
+                logger.info(
+                    f"News exit VETOED by order flow for {ticker}: "
+                    f"news={score:.2f} but OF={of_result.score:+.2f} "
+                    f"(buyers absorbing the bad news — holding)"
+                )
+                continue
+
+            reason = f"negative news exit (score={score:.2f}): {headline[:80]}"
+            logger.info(f"Exiting {ticker} on negative news | {reason}")
+            self._close_position(ticker, pos, reason)
+            self.reporter.send(
+                f"\U0001f4f0 <b>NEWS EXIT</b>\n"
+                f"  Selling <b>{ticker}</b> on negative news\n"
+                f"  News score: {score:.2f} (threshold: {self._neg_news_min_score})\n"
+                f"  Headline: <i>\"{headline[:120]}\"</i>\n"
+                f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+            )
 
     # ── Position closing ──────────────────────────────────────────────────
 
