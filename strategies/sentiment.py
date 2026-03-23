@@ -118,19 +118,22 @@ class SentimentStrategy:
         try:
             from alpaca.data.requests import NewsRequest
             since = now - timedelta(minutes=self.lookback_minutes)
-            req = NewsRequest(symbols=list(held_tickers), start=since, limit=50)
-            news = self.alpaca.get_news(req)
-            for item in (news.news if hasattr(news, "news") else news):
-                for sym in (getattr(item, "symbols", []) or []):
-                    if sym in held_tickers:
-                        articles_by_ticker.setdefault(sym, []).append({
+            # Fetch per ticker — avoids Alpaca SDK list-vs-string validation issues
+            for ticker in held_tickers:
+                try:
+                    req = NewsRequest(symbols=ticker, start=since, limit=20)
+                    news = self.alpaca.get_news(req)
+                    for item in (news.news if hasattr(news, "news") else news):
+                        articles_by_ticker.setdefault(ticker, []).append({
                             "id": str(getattr(item, "id", "") or ""),
                             "headline": getattr(item, "headline", "") or "",
                             "summary": getattr(item, "summary", "") or "",
                             "created_at": getattr(item, "created_at", None),
                         })
+                except Exception as e:
+                    logger.debug(f"Negative signal fetch failed for {ticker}: {e}")
         except Exception as e:
-            logger.warning(f"Negative signal fetch failed: {e}")
+            logger.warning(f"Negative signal fetch setup failed: {e}")
             return {}
 
         results = {}
@@ -326,24 +329,25 @@ class SentimentStrategy:
         from alpaca.data.requests import NewsRequest
 
         since = datetime.now(timezone.utc) - timedelta(minutes=self.lookback_minutes)
-        symbols = list(self.watchlist) if self.watchlist else None
+        result = []
 
-        try:
-            req = NewsRequest(symbols=symbols, start=since, limit=50)
-            news = self.alpaca.get_news(req)
-            result = []
-            for item in (news.news if hasattr(news, "news") else news):
-                result.append({
-                    "id": str(getattr(item, "id", "") or ""),
-                    "headline": getattr(item, "headline", "") or "",
-                    "summary": getattr(item, "summary", "") or "",
-                    "symbols": getattr(item, "symbols", []) or [],
-                    "created_at": getattr(item, "created_at", None),
-                })
-            return result
-        except Exception as e:
-            logger.debug(f"Alpaca news detail: {e}")
-            return []
+        # Fetch per ticker — Alpaca SDK validates symbols as string not list
+        tickers = list(self.watchlist) if self.watchlist else []
+        for ticker in tickers:
+            try:
+                req = NewsRequest(symbols=ticker, start=since, limit=20)
+                news = self.alpaca.get_news(req)
+                for item in (news.news if hasattr(news, "news") else news):
+                    result.append({
+                        "id": str(getattr(item, "id", "") or ""),
+                        "headline": getattr(item, "headline", "") or "",
+                        "summary": getattr(item, "summary", "") or "",
+                        "symbols": getattr(item, "symbols", []) or [],
+                        "created_at": getattr(item, "created_at", None),
+                    })
+            except Exception as e:
+                logger.debug(f"Alpaca news fetch failed for {ticker}: {e}")
+        return result
 
     def _fetch_finnhub(self, ticker: str) -> list:
         url = "https://finnhub.io/api/v1/company-news"
