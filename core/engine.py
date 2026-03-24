@@ -232,12 +232,6 @@ class TradingEngine:
                 self._close_all_positions("daily loss limit hit")
                 self._save_checkpoint()
 
-        # ── Status report ─────────────────────────────────────────────────
-        if (now - self._last_report_time).total_seconds() >= self.report_interval_sec:
-            self._last_report_time = now
-            self._send_status_report()
-            self._save_checkpoint()
-
         # ── Session window open/close alerts ────────────────────────────────
         can_trade, reason = self.risk.can_trade()
         new_session_state = "open" if can_trade else "closed"
@@ -252,8 +246,10 @@ class TradingEngine:
                     open_positions=open_count,
                     is_paper=self.broker.paper,
                 )
+                # Reset report timer so first hourly report comes at the right interval
+                self._last_report_time = now
             elif new_session_state == "closed" and self._session_state == "open":
-                # Transition: open → closed (approaching market close or market closed)
+                # Transition: open → closed — send immediate status report
                 account = self.broker.get_account()
                 trades_today = self.broker.get_closed_orders_today()
                 logger.info(f"Trading session CLOSED — reason: {reason}")
@@ -263,7 +259,21 @@ class TradingEngine:
                     trades_today=len(trades_today),
                     is_paper=self.broker.paper,
                 )
+                # Send a full status report at close too
+                self._send_status_report()
+                self._last_report_time = now
+                self._save_checkpoint()
             self._session_state = new_session_state
+
+        # ── Periodic status report (market hours only) ─────────────────────
+        # Only send during active trading session — no point reporting at 3am
+        if (
+            can_trade
+            and (now - self._last_report_time).total_seconds() >= self.report_interval_sec
+        ):
+            self._last_report_time = now
+            self._send_status_report()
+            self._save_checkpoint()
 
         # ── News scan ─────────────────────────────────────────────────────
         if (now - self._last_news_scan).total_seconds() >= self.scan_interval_sec:

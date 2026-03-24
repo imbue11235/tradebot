@@ -71,7 +71,7 @@ fees:
   sec_fee_per_dollar: 0.0000278     # SEC Section 31 fee (sell side only)
   finra_taf_per_share: 0.000166     # FINRA TAF (sell side, max $8.30)
   finra_taf_max_usd: 8.30
-  currency_conversion_fee_pct: 0.00  # e.g. 0.25% for DKK→USD
+  currency_conversion_fee_pct: 0.00   # Alpaca trades in USD — no conversion fee
 
 # ── News & Sentiment ──────────────────────────
 # Optional: FINNHUB_KEY loaded from .env (real-time, free tier, 60 req/min)
@@ -96,8 +96,7 @@ news:
 #   The bot handles this gracefully — it skips and logs, never errors.
 #   Alpaca supports fractional shares; set fractional: true below to enable.
 #
-fractional_shares: true       # Set true to allow fractional share purchases.
-                               # Removes the price floor problem entirely for any budget.
+fractional_shares: true        # Fractional shares enabled — no price floor.
 
 universe:
   watchlist:
@@ -194,7 +193,7 @@ order_flow_confirmation:
 # ── Telegram reporting ────────────────────────
 # Token and chat_id loaded from .env: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
 telegram:
-  report_interval_hours: 12
+  report_interval_hours: 1     # During market hours only; also sends at session close
   report_on_trade: true
 
 # ── Logging ───────────────────────────────────
