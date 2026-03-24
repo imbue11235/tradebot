@@ -19,7 +19,9 @@ services:
   dashboard:
     build: .
     container_name: tradebot-dashboard
-    restart: unless-stopped
+    restart: always
+    # Wait 5s before restart to avoid tight crash loops
+    stop_grace_period: 10s
     env_file: .env
     environment:
       TRANSFORMERS_VERBOSITY: error

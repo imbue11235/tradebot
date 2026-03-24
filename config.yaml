@@ -177,6 +177,10 @@ order_flow_confirmation:
   # ── Data settings ──────────────────────────────────────────────────────
   # How many minutes of trade history to use for delta calculation.
   # Shorter = more reactive. Longer = more stable but slower to update.
+  # Set false if on Alpaca free plan (no SIP data) — auto-detected but
+  # setting false avoids the warning and skips the failed request entirely.
+  use_trades: true
+
   trade_window_minutes: 5
 
   # Minimum trades needed to produce a valid signal.

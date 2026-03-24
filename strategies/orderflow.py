@@ -1,43 +1,34 @@
 """
 strategies/orderflow.py — Microstructure order flow analysis.
 
-Computes three signals from real market data for a given ticker:
+Computes three signals from real market data for a given ticker.
+All three signals work on Alpaca's free plan.
+
+NOTE ON SIP DATA TIMING:
+  Alpaca's free plan enforces a 15-minute delay on SIP trade data.
+  We work around this by fetching a window that ends ~15 minutes ago
+  (omitting the end parameter so Alpaca defaults it to the allowed cutoff).
+  With trade_window_minutes=5, trades from roughly 16-21 minutes ago are used.
+  Quote and absorption signals use live data with no delay.
+
+Signals computed:
 
 1. DELTA
-   The difference between aggressive buy volume and aggressive sell volume
-   over a recent window of trades.
-     - Trade at/above ask → aggressive buy (buyer hit the ask)
-     - Trade at/below bid → aggressive sell (seller hit the bid)
-   Positive delta = more buyers. Negative = more sellers.
-   Normalised to [-1, +1] as delta_ratio = net_delta / total_volume.
+   Aggressive buy volume minus aggressive sell volume over the recent window.
+   Trade at/above ask = buyer initiated. At/below bid = seller initiated.
+   Normalised: delta_ratio = net_delta / total_volume ∈ [-1, +1]
 
 2. BID/ASK IMBALANCE
-   The size ratio at the top of the order book right now.
-     imbalance = (bid_size - ask_size) / (bid_size + ask_size)
-   Range: [-1, +1]. Positive = buyers queued up. Negative = sellers waiting.
-   This is a leading indicator — it reflects intent, not just what has traded.
+   (bid_size - ask_size) / (bid_size + ask_size) ∈ [-1, +1]
+   Live — reflects real-time order book pressure.
+   Positive = buy-side pressure. Negative = sell-side pressure.
 
 3. ABSORPTION
-   Measures whether price is making progress relative to the delta being
-   applied. If heavy buy delta is building but price isn't moving up,
-   sellers are absorbing the buying — a bearish sign despite positive delta.
-   Computed across multiple snapshots taken a few seconds apart.
-     absorption_score > 0 → buyers absorbing sellers (bullish)
-     absorption_score < 0 → sellers absorbing buyers (bearish)
+   Price movement vs order book pressure across multiple live snapshots.
+   If heavy bid imbalance but price not rising → sellers absorbing → bearish.
+   If heavy ask imbalance but price not falling → buyers absorbing → bullish.
 
-COMPOSITE SCORE
-   Weighted combination of all three:
-     score = (delta_weight × delta_ratio)
-           + (imbalance_weight × imbalance)
-           + (absorption_weight × absorption_score)
-   Range: [-1, +1]. Configurable weights and thresholds.
-
-USAGE
-   orderflow.analyse(ticker) → OrderFlowResult
-   result.score        # composite [-1, +1]
-   result.confirms_buy # True if score >= min_buy_score
-   result.confirms_sell # True if score <= min_sell_score (veto on news exit)
-   result.summary      # human-readable string for logging/telegram
+COMPOSITE SCORE: weighted combination ∈ [-1, +1]
 """
 
 import logging
@@ -48,107 +39,99 @@ from typing import Optional
 
 logger = logging.getLogger("tradebot")
 
-
 @dataclass
 class OrderFlowResult:
     ticker: str
-    score: float                  # composite [-1, +1]
-    delta_ratio: float            # net delta / total volume [-1, +1]
-    imbalance: float              # bid/ask size imbalance [-1, +1]
-    absorption_score: float       # absorption signal [-1, +1]
-    trade_count: int              # trades analysed
+    score: float
+    delta_ratio: float
+    imbalance: float
+    absorption_score: float
+    trade_count: int
     confirms_buy: bool
-    confirms_sell_veto: bool      # True = order flow says DON'T sell (overrides news exit)
-    reason: str                   # human-readable explanation
+    confirms_sell_veto: bool
+    mode: str          # "full" or "quote_only"
+    reason: str
 
     @property
     def summary(self) -> str:
         direction = "BULLISH" if self.score > 0 else "BEARISH"
         return (
-            f"{self.ticker} orderflow={self.score:+.2f} [{direction}] | "
+            f"{self.ticker} OF={self.score:+.2f} [{direction}] [{self.mode}] | "
             f"delta={self.delta_ratio:+.2f} "
             f"imbalance={self.imbalance:+.2f} "
-            f"absorption={self.absorption_score:+.2f} "
-            f"trades={self.trade_count}"
+            f"absorption={self.absorption_score:+.2f}"
         )
 
 
 class OrderFlowAnalyser:
     def __init__(self, cfg: dict, data_client):
-        """
-        cfg: the order_flow_confirmation block from config.yaml
-        data_client: Alpaca StockHistoricalDataClient instance
-        """
         self.data = data_client
         self.enabled = cfg.get("enabled", True)
+        self.use_trades = cfg.get("use_trades", True)  # set false to skip SIP entirely
 
-        # Score thresholds
         self.min_buy_score = cfg.get("min_buy_score", 0.15)
         self.min_sell_veto_score = cfg.get("min_sell_veto_score", 0.20)
 
-        # Component weights (must sum to 1.0)
         weights = cfg.get("weights", {})
         self.w_delta      = weights.get("delta",      0.50)
         self.w_imbalance  = weights.get("imbalance",  0.30)
         self.w_absorption = weights.get("absorption", 0.20)
 
-        # Data window
         self.trade_window_minutes = cfg.get("trade_window_minutes", 5)
         self.min_trades = cfg.get("min_trades", 10)
-
-        # Absorption: how many snapshots to take and interval between them
         self.absorption_snapshots = cfg.get("absorption_snapshots", 3)
         self.absorption_interval_sec = cfg.get("absorption_interval_sec", 2)
 
     def analyse(self, ticker: str) -> Optional[OrderFlowResult]:
-        """
-        Run full order flow analysis for a single ticker.
-        Returns None if insufficient data or disabled.
-        """
         if not self.enabled:
             return None
 
         try:
-            # ── Step 1: fetch recent trades for delta calculation ──────────
-            trades = self._fetch_trades(ticker)
-            if len(trades) < self.min_trades:
-                logger.debug(
-                    f"OrderFlow {ticker}: only {len(trades)} trades "
-                    f"(min {self.min_trades}) — skipping"
-                )
-                return None
-
-            # ── Step 2: fetch current quote for imbalance ─────────────────
             quote = self._fetch_quote(ticker)
             if quote is None:
                 return None
 
-            # ── Step 3: compute delta ──────────────────────────────────────
-            delta_ratio = self._compute_delta(trades, quote)
+            # ── Try trade-based delta (requires paid SIP) ──────────────────
+            delta_ratio = 0.0
+            trade_count = 0
+            mode = "quote_only"
 
-            # ── Step 4: compute bid/ask imbalance ─────────────────────────
-            imbalance = self._compute_imbalance(quote)
+            if self.use_trades:
+                trades = self._fetch_trades(ticker)
+                if trades:
+                    delta_ratio = self._compute_delta(trades, quote)
+                    trade_count = len(trades)
+                    mode = "full"
 
-            # ── Step 5: compute absorption ────────────────────────────────
+            # In quote-only mode, re-weight to compensate for missing delta
+            if mode == "quote_only":
+                w_imbalance  = self.w_imbalance + (self.w_delta * 0.6)
+                w_absorption = self.w_absorption + (self.w_delta * 0.4)
+                w_delta = 0.0
+            else:
+                w_delta      = self.w_delta
+                w_imbalance  = self.w_imbalance
+                w_absorption = self.w_absorption
+
+            imbalance  = self._compute_imbalance(quote)
             absorption = self._compute_absorption(ticker, quote)
 
-            # ── Step 6: composite score ───────────────────────────────────
             score = (
-                self.w_delta      * delta_ratio +
-                self.w_imbalance  * imbalance +
-                self.w_absorption * absorption
+                w_delta      * delta_ratio +
+                w_imbalance  * imbalance +
+                w_absorption * absorption
             )
-            score = max(-1.0, min(1.0, score))  # clamp
+            score = max(-1.0, min(1.0, score))
 
-            confirms_buy = score >= self.min_buy_score
+            confirms_buy       = score >= self.min_buy_score
             confirms_sell_veto = score >= self.min_sell_veto_score
 
             if confirms_buy:
-                reason = f"order flow confirms buy (score={score:+.2f})"
+                reason = f"order flow confirms buy (score={score:+.2f}, {mode})"
             elif score < 0:
-                reason = f"order flow bearish — buy skipped (score={score:+.2f})"
+                reason = f"order flow bearish — skipped (score={score:+.2f}, {mode})"
             else:
-                reason = f"order flow neutral — buy skipped (score={score:+.2f}, need {self.min_buy_score})"
+                reason = f"order flow neutral — skipped (score={score:+.2f}, need {self.min_buy_score}, {mode})"
 
             result = OrderFlowResult(
                 ticker=ticker,
@@ -156,9 +139,10 @@ class OrderFlowAnalyser:
                 delta_ratio=delta_ratio,
                 imbalance=imbalance,
                 absorption_score=absorption,
-                trade_count=len(trades),
+                trade_count=trade_count,
                 confirms_buy=confirms_buy,
                 confirms_sell_veto=confirms_sell_veto,
+                mode=mode,
                 reason=reason,
             )
             logger.debug(result.summary)
@@ -171,67 +155,38 @@ class OrderFlowAnalyser:
     # ── Delta ─────────────────────────────────────────────────────────────────
 
     def _compute_delta(self, trades: list, quote: dict) -> float:
-        """
-        Classify each trade as aggressive buy or sell using the Lee-Ready rule:
-          price >= ask → buyer-initiated (aggressive buy)
-          price <= bid → seller-initiated (aggressive sell)
-          mid          → neutral (ignored)
-        Returns net_delta / total_volume normalised to [-1, +1].
-        """
         bid = quote["bid"]
         ask = quote["ask"]
         mid = (bid + ask) / 2
-
-        buy_vol = 0.0
-        sell_vol = 0.0
+        buy_vol = sell_vol = 0.0
 
         for t in trades:
             price = t["price"]
-            size = t["size"]
+            size  = t["size"]
             if price >= ask:
                 buy_vol += size
             elif price <= bid:
                 sell_vol += size
             elif price > mid:
-                # Tick rule fallback: slightly above mid = buy-side
                 buy_vol += size * 0.5
             else:
                 sell_vol += size * 0.5
 
         total = buy_vol + sell_vol
-        if total == 0:
-            return 0.0
-        return (buy_vol - sell_vol) / total
+        return (buy_vol - sell_vol) / total if total else 0.0
 
     # ── Imbalance ─────────────────────────────────────────────────────────────
 
     def _compute_imbalance(self, quote: dict) -> float:
-        """
-        Bid/ask size imbalance at top of book.
-        (bid_size - ask_size) / (bid_size + ask_size)
-        """
         bid_size = quote.get("bid_size", 0)
         ask_size = quote.get("ask_size", 0)
         total = bid_size + ask_size
-        if total == 0:
-            return 0.0
-        return (bid_size - ask_size) / total
+        return (bid_size - ask_size) / total if total else 0.0
 
     # ── Absorption ────────────────────────────────────────────────────────────
 
     def _compute_absorption(self, ticker: str, initial_quote: dict) -> float:
-        """
-        Take multiple quote snapshots and compare price movement to delta.
-        If delta is positive but price doesn't rise → sellers absorbing buyers (bearish).
-        If delta is negative but price doesn't fall → buyers absorbing sellers (bullish).
-
-        Returns score in [-1, +1]:
-          +1 = buyers absorbing sellers strongly (bullish absorption)
-          -1 = sellers absorbing buyers strongly (bearish absorption)
-           0 = price moving in line with delta (no absorption)
-        """
         snapshots = [initial_quote]
-
         for _ in range(self.absorption_snapshots - 1):
             time.sleep(self.absorption_interval_sec)
             q = self._fetch_quote(ticker)
@@ -241,71 +196,62 @@ class OrderFlowAnalyser:
         if len(snapshots) < 2:
             return 0.0
 
-        # Price change over snapshot window
-        price_start = (snapshots[0]["bid"] + snapshots[0]["ask"]) / 2
-        price_end   = (snapshots[-1]["bid"] + snapshots[-1]["ask"]) / 2
-        price_delta = price_end - price_start
-        price_pct   = price_delta / price_start if price_start > 0 else 0.0
+        price_start   = (snapshots[0]["bid"] + snapshots[0]["ask"]) / 2
+        price_end     = (snapshots[-1]["bid"] + snapshots[-1]["ask"]) / 2
+        price_pct     = (price_end - price_start) / price_start if price_start else 0.0
+        avg_imbalance = sum(self._compute_imbalance(s) for s in snapshots) / len(snapshots)
 
-        # Average delta ratio across snapshots
-        avg_imbalance = sum(
-            self._compute_imbalance(s) for s in snapshots
-        ) / len(snapshots)
-
-        # Absorption = delta pointing one way, price not following
-        # If avg_imbalance > 0 (bid heavy) but price fell → bearish absorption
-        # If avg_imbalance < 0 (ask heavy) but price rose → bullish absorption
         if abs(avg_imbalance) < 0.05:
-            return 0.0  # too neutral to read absorption
+            return 0.0
 
-        expected_direction = 1.0 if avg_imbalance > 0 else -1.0
-        actual_direction = 1.0 if price_pct > 0 else (-1.0 if price_pct < 0 else 0.0)
+        expected = 1.0 if avg_imbalance > 0 else -1.0
+        actual   = 1.0 if price_pct > 0 else (-1.0 if price_pct < 0 else 0.0)
 
-        if expected_direction != actual_direction and actual_direction != 0:
-            # Price moving against the order book pressure = absorption
-            # The side being absorbed is the losing side
-            # expected buy pressure but price down = sellers absorbing = bearish for buyer
-            return -expected_direction * min(abs(avg_imbalance), 1.0)
+        if expected != actual and actual != 0:
+            return -expected * min(abs(avg_imbalance), 1.0)
         else:
-            # Price confirming order book direction = no absorption, flow is clean
-            return expected_direction * 0.3  # mild confirmation bonus
+            return expected * 0.3
 
     # ── Data fetching ─────────────────────────────────────────────────────────
 
     def _fetch_trades(self, ticker: str) -> list:
         from alpaca.data.requests import StockTradesRequest
 
-        since = datetime.now(timezone.utc) - timedelta(minutes=self.trade_window_minutes)
-        req = StockTradesRequest(
-            symbol_or_symbols=ticker,
-            start=since,
-            limit=1000,
-        )
-        trades_response = self.data.get_stock_trades(req)
-        raw = trades_response.get(ticker, []) if hasattr(trades_response, "get") else []
+        try:
+            # Free plan restriction: end must be >= 15 min in the past.
+            # Fix: shift the window back 16 min and omit end entirely —
+            # Alpaca defaults end to exactly the allowed cutoff.
+            # e.g. trade_window_minutes=5 → fetches trades from -21min to -16min ago.
+            SIP_LAG = 16  # minutes
+            since = datetime.now(timezone.utc) - timedelta(
+                minutes=self.trade_window_minutes + SIP_LAG
+            )
+            req = StockTradesRequest(symbol_or_symbols=ticker, start=since, limit=1000)
+            resp = self.data.get_stock_trades(req)
 
-        # Handle both dict and iterable response formats
-        if not raw and hasattr(trades_response, "__iter__"):
-            try:
-                raw = list(trades_response[ticker])
-            except (KeyError, TypeError):
-                raw = []
+            raw = []
+            if hasattr(resp, "get"):
+                raw = resp.get(ticker, [])
+            if not raw and hasattr(resp, "__iter__"):
+                try:
+                    raw = list(resp[ticker])
+                except (KeyError, TypeError):
+                    pass
 
-        result = []
-        for t in raw:
-            try:
-                result.append({
-                    "price": float(t.price),
-                    "size":  float(t.size),
-                    "ts":    t.timestamp,
-                })
-            except Exception:
-                continue
-        return result
+            result = []
+            for t in raw:
+                try:
+                    result.append({"price": float(t.price), "size": float(t.size)})
+                except Exception:
+                    continue
+            return result
+
+        except Exception as e:
+            logger.debug(f"Trade fetch failed for {ticker}: {e}")
+            return []
 
     def _fetch_quote(self, ticker: str) -> Optional[dict]:
         from alpaca.data.requests import StockLatestQuoteRequest
-
         try:
             req = StockLatestQuoteRequest(symbol_or_symbols=ticker)
             quotes = self.data.get_stock_latest_quote(req)
