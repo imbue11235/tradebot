@@ -13,21 +13,32 @@ alpaca:
 budget:
   max_total_usd: 10000         # Hard cap — bot never exceeds this
   reserve_pct: 0.05            # Keep 5% cash as buffer (covers fees)
-  max_open_positions: 8        # Max concurrent holdings
-                               # ↑ Lower to 3 if running with ~$100
+  # CEILING not a target — bot will hold fewer positions if signals are weak.
+  # It will never open a position just to fill a slot.
+  max_open_positions: 8
 
 # ── Position sizing (confidence-scaled) ───────
 sizing:
+  # Tiers: confidence score → % of available budget for that trade.
+  # The bot sizes UP on conviction and DOWN on uncertainty.
+  # Nothing forces it to use all tiers — if only 0.90+ signals appear,
+  # it only opens high-conviction positions.
   tiers:
-    - min_score: 0.75
+    - min_score: 0.80
       max_score: 1.00
-      budget_pct: 0.10         # High conviction  → up to 10% of budget
-    - min_score: 0.55
-      max_score: 0.75
-      budget_pct: 0.05         # Medium conviction → up to 5%
+      budget_pct: 0.20         # Very high conviction → 20% of budget
+    - min_score: 0.65
+      max_score: 0.80
+      budget_pct: 0.10         # High conviction      → 10%
+    - min_score: 0.50
+      max_score: 0.65
+      budget_pct: 0.05         # Medium conviction    → 5%
     - min_score: 0.40
-      max_score: 0.55
-      budget_pct: 0.02         # Low conviction    → up to 2%
+      max_score: 0.50
+      budget_pct: 0.02         # Low conviction       → 2% (or skip — see threshold)
+  # Hard cap per position regardless of confidence.
+  # Prevents any single trade from exceeding this % of budget.
+  max_position_pct: 0.25       # No single position > 25% of budget
   min_trade_usd: 20            # Lower to 5 if running with ~$100 budget
 
 # ── Risk management ───────────────────────────
