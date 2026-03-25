@@ -378,6 +378,19 @@ class TradingEngine:
                 open_count += 1
                 available_cash -= allocated_usd
 
+                self.trade_logger.log({
+                    "ticker": ticker,
+                    "side": "buy",
+                    "qty": shares,
+                    "entry_price": price,
+                    "exit_price": "",
+                    "gross_pnl": "",
+                    "fees_usd": round(self.fee_calc.estimate_entry(shares, price), 6),
+                    "net_pnl": "",
+                    "confidence": signal.score,
+                    "signal_reason": signal.headline,
+                    "hold_minutes": "",
+                })
                 self.reporter.trade_alert(
                     side="buy",
                     ticker=ticker,

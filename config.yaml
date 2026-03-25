@@ -43,8 +43,8 @@ sizing:
 
 # ── Risk management ───────────────────────────
 risk:
-  stop_loss_pct: 0.025         # Exit if position drops 2.5%
-  take_profit_pct: 0.04        # Exit if position gains 4%
+  stop_loss_pct: 0.012         # Exit if position drops 1.2%
+  take_profit_pct: 0.020       # Exit if position gains 2%
   max_daily_loss_pct: 0.05     # Halt trading if daily loss exceeds 5%
   trade_only_market_hours: true
   avoid_first_minutes: 15      # Skip first 15 min of session (volatile open)
@@ -77,8 +77,8 @@ fees:
 # Optional: FINNHUB_KEY loaded from .env (real-time, free tier, 60 req/min)
 news:
   lookback_minutes: 120  # matches MAX_ARTICLE_AGE_MINUTES in sentiment.py
-  min_articles_for_signal: 1
-  sentiment_threshold: 0.40
+  min_articles_for_signal: 2   # Require 2+ articles — prevents single misfired tags
+  sentiment_threshold: 0.55    # Raised — filters out weak/ambiguous signals
 
 # ── Universe ──────────────────────────────────
 # Tickers are grouped by sector/theme.
@@ -134,7 +134,7 @@ universe:
     - QQQ     # Nasdaq 100 ETF ~$490  — tech-heavy market sentiment
     - XLF     # Financials ETF ~$50   — sector-wide financial news signal
 
-  allow_opportunistic: true
+  allow_opportunistic: false   # Disabled — was triggering on unrelated tickers
   opportunistic_min_score: 0.80   # Only act on very strong off-watchlist signals
 
 # ── Order flow confirmation ───────────────────
