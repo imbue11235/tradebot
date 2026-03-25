@@ -96,18 +96,28 @@ def api_equity():
     return jsonify(read_equity_curve())
 
 
+def _sf(val, default=0.0):
+    try:
+        return float(val) if val not in (None, "", "None") else default
+    except (ValueError, TypeError):
+        return default
+
+
 @app.route("/api/summary")
 def api_summary():
     state = read_state()
-    trades = read_trades(200)
+    all_trades = read_trades(200)
 
-    wins = [t for t in trades if float(t.get("net_pnl", 0)) > 0]
-    losses = [t for t in trades if float(t.get("net_pnl", 0)) < 0]
-    total_pnl = sum(float(t.get("net_pnl", 0)) for t in trades)
-    total_fees = sum(float(t.get("fees_usd", 0)) for t in trades)
+    # Only sell rows have meaningful P&L -- buy rows have empty net_pnl
+    trades = [t for t in all_trades if t.get("side", "").lower() == "sell"]
+
+    wins = [t for t in trades if _sf(t.get("net_pnl")) > 0]
+    losses = [t for t in trades if _sf(t.get("net_pnl")) < 0]
+    total_pnl = sum(_sf(t.get("net_pnl")) for t in trades)
+    total_fees = sum(_sf(t.get("fees_usd")) for t in all_trades)
     win_rate = len(wins) / len(trades) * 100 if trades else 0
-    avg_win = sum(float(t["net_pnl"]) for t in wins) / len(wins) if wins else 0
-    avg_loss = sum(float(t["net_pnl"]) for t in losses) / len(losses) if losses else 0
+    avg_win = sum(_sf(t["net_pnl"]) for t in wins) / len(wins) if wins else 0
+    avg_loss = sum(_sf(t["net_pnl"]) for t in losses) / len(losses) if losses else 0
 
     return jsonify({
         "total_trades": len(trades),
