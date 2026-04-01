@@ -22,6 +22,35 @@ import requests
 
 logger = logging.getLogger("tradebot")
 
+# Map of ticker → names/keywords that should appear in a relevant headline.
+# If NONE of these appear in the headline, the article is considered off-topic
+# for that ticker and is filtered out before scoring.
+# This prevents "Eli Lilly raises AI budget" from triggering NVDA, etc.
+TICKER_KEYWORDS: dict[str, list[str]] = {
+    "AAPL": ["apple", "iphone", "ipad", "mac", "tim cook", "app store", "aapl"],
+    "MSFT": ["microsoft", "azure", "copilot", "openai", "windows", "msft"],
+    "GOOGL": ["google", "alphabet", "gemini", "youtube", "waymo", "googl"],
+    "AMZN": ["amazon", "aws", "alexa", "prime", "amzn"],
+    "META": ["meta", "facebook", "instagram", "whatsapp", "zuckerberg", "llama"],
+    "NVDA": ["nvidia", "nvda", "cuda", "h100", "blackwell", "jensen huang"],
+    "AMD": ["amd", "ryzen", "radeon", "epyc", "lisa su", "advanced micro"],
+    "TSLA": ["tesla", "tsla", "elon musk", "cybertruck", "autopilot", "fsd", "gigafactory"],
+    "PLTR": ["palantir", "pltr", "alex karp"],
+    "CRWD": ["crowdstrike", "crwd", "falcon"],
+    "AVGO": ["broadcom", "avgo", "hock tan"],
+    "TSM": ["tsmc", "taiwan semiconductor", "tsm"],
+    "QCOM": ["qualcomm", "qcom", "snapdragon"],
+    "CRM": ["salesforce", "crm", "marc benioff", "slack"],
+    "SNOW": ["snowflake", "snow"],
+    "NET": ["cloudflare", "net"],
+    "JPM": ["jpmorgan", "jp morgan", "jpm", "jamie dimon"],
+    "GS": ["goldman sachs", "goldman"],
+    "BAC": ["bank of america", "bofa", "bac", "brian moynihan"],
+    "SPY": ["s&p 500", "sp500", "s&p500", "spy", "spdr"],
+    "QQQ": ["nasdaq", "qqq"],
+    "XLF": ["xlf", "financial select", "financials etf"],
+}
+
 # Hard cutoff: articles older than this are ignored entirely regardless of source.
 # Day-trading is intraday — yesterday's news is already priced in.
 MAX_ARTICLE_AGE_MINUTES = 120   # 2 hours
@@ -194,8 +223,17 @@ class SentimentStrategy:
                         break
                     else:
                         logger.warning(f"Finnhub fetch failed for {ticker}: {e}")
+                except requests.exceptions.Timeout:
+                    # Finnhub is timing out — disable for 1 hour to stop log spam
+                    cooldown = datetime.now(timezone.utc) + timedelta(hours=1)
+                    self._finnhub_disabled_until = cooldown
+                    logger.warning(
+                        f"Finnhub timed out repeatedly — pausing for 1 hour "
+                        f"(until {cooldown.strftime('%H:%M UTC')})"
+                    )
+                    break
                 except Exception as e:
-                    logger.warning(f"Finnhub fetch failed for {ticker}: {e}")
+                    logger.debug(f"Finnhub fetch failed for {ticker}: {e}")
 
         # ── Score and filter ───────────────────────────────────────────────
         signals = []
@@ -222,6 +260,32 @@ class SentimentStrategy:
             in_watchlist = ticker in self.watchlist
             if not in_watchlist:
                 if not self.allow_opportunistic or abs_score < self.opp_threshold:
+                    continue
+
+            # ── Relevance filter ──────────────────────────────────────────
+            # Require at least one article whose headline actually mentions
+            # the ticker or a known company keyword. Prevents Alpaca's broad
+            # topic tagging from triggering trades on unrelated articles.
+            if ticker in TICKER_KEYWORDS:
+                keywords = TICKER_KEYWORDS[ticker]
+                relevant = [
+                    a for a in new_articles
+                    if any(
+                        kw in (a.get("headline") or a.get("title") or "").lower()
+                        for kw in keywords
+                    )
+                ]
+                if not relevant:
+                    logger.debug(
+                        f"Skipping {ticker}: no articles mention company by name "
+                        f"(got {len(new_articles)} articles but none reference {ticker})"
+                    )
+                    continue
+                # Only score articles that are actually about this ticker
+                new_articles = relevant
+                score = self._aggregate_score(new_articles)
+                abs_score = abs(score)
+                if score <= 0 or abs_score < self.threshold:
                     continue
 
             # Best headline — safely handles None fields
